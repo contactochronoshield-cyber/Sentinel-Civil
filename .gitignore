@@ -1,0 +1,4 @@
+.env
+Chrono-core/
+__pycache__/
+*.bak
