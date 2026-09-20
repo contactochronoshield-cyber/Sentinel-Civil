@@ -2,7 +2,7 @@
 
 **Monitoreo de infraestructura anti-sabotaje que corre en un celular viejo con Termux — sin nube, sin dependencias pesadas, sin que nadie más vea tus datos.**
 
-![version](https://img.shields.io/badge/version-1.8.0-blue)
+![version](https://img.shields.io/badge/version-1.9.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
 ![platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20Android-lightgrey)
@@ -29,6 +29,7 @@ Es la pieza base de código abierto detrás de la infraestructura de [Chrono Shi
 - Alerta temprana de degradacion de senal RSSI, ideal para WISPs con antenas
 - Modo Site Survey (--survey) para encontrar el mejor punto de senal en un edificio
 - Auditoria de tunel VPN: detecta WireGuard/Tailscale, mide handshake y latencia del tunel
+- Deteccion de dispositivos desconocidos en la red local (barrido de IPs, sin necesitar root)
 
 ## 🚀 Quickstart
 

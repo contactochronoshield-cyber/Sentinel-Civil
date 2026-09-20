@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "1.8.0-COMMUNITY"
+VERSION = "1.9.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -51,6 +51,12 @@ DEFAULT_CONFIG = {
         "handshake_stale_seconds": 180,
         "latency_compare_target": "1.1.1.1"
     },
+    "lan_monitoring": {
+        "enabled": True,
+        "known_ips": [],
+        "auto_baseline": True,
+        "sweep_interval_cycles": 6
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -70,10 +76,19 @@ def load_config():
     merged["central_reporting"] = {**DEFAULT_CONFIG["central_reporting"], **cfg.get("central_reporting", {})}
     merged["signal_monitoring"] = {**DEFAULT_CONFIG["signal_monitoring"], **cfg.get("signal_monitoring", {})}
     merged["vpn_monitoring"] = {**DEFAULT_CONFIG["vpn_monitoring"], **cfg.get("vpn_monitoring", {})}
+    merged["lan_monitoring"] = {**DEFAULT_CONFIG["lan_monitoring"], **cfg.get("lan_monitoring", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
 CONFIG = load_config()
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error guardando config.json: {e}")
+
 
 logger = logging.getLogger("SentinelCivic")
 logger.setLevel(logging.INFO)
@@ -260,6 +275,53 @@ def ping_via_interface(iface, target, count=2):
         return None
 
 # ---------------------------------------------------------------------------
+# INVENTARIO LAN - deteccion de dispositivos desconocidos en la red
+# ---------------------------------------------------------------------------
+def get_local_subnet_prefix():
+    try:
+        output = subprocess.check_output("ifconfig 2>/dev/null", shell=True).decode("utf-8")
+        blocks = output.split("\n\n")
+        for block in blocks:
+            if block.strip().startswith("wlan0:"):
+                for line in block.split("\n"):
+                    parts = line.strip().split()
+                    if "inet" in parts:
+                        idx = parts.index("inet")
+                        if idx + 1 < len(parts):
+                            ip = parts[idx + 1]
+                            p = ip.split(".")
+                            if len(p) == 4:
+                                return ".".join(p[:3])
+        return None
+    except Exception:
+        return None
+
+def _ping_host(ip):
+    try:
+        subprocess.check_output(
+            f"ping -c 1 -W 1 {ip} 2>/dev/null", shell=True
+        )
+        return ip
+    except Exception:
+        return None
+
+def get_lan_devices():
+    import concurrent.futures
+    prefix = get_local_subnet_prefix()
+    if not prefix:
+        return []
+    hosts = [f"{prefix}.{i}" for i in range(1, 255)]
+    found = []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+            for result in executor.map(_ping_host, hosts):
+                if result:
+                    found.append({"ip": result})
+    except Exception:
+        pass
+    return found
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -333,6 +395,7 @@ class CivicKernel:
             loss, latency = self.check_layer3_telemetry()
             rssi = self.check_signal_quality()
             self.check_vpn_tunnels()
+            self.check_lan_devices()
 
             db_insert_metric(cpu, ram, loss, latency, rssi)
             send_central_report(metrics=[{
@@ -534,6 +597,51 @@ class CivicKernel:
                 print(f"    - Latencia via tunel ({target}): {latency} ms")
             else:
                 print(f"    - Latencia via tunel: sin respuesta (tunel posiblemente caido)")
+
+    def check_lan_devices(self):
+        lm = CONFIG.get("lan_monitoring", {})
+        if not lm.get("enabled"):
+            return
+
+        if not hasattr(self, "lan_cycle_counter"):
+            self.lan_cycle_counter = 0
+        self.lan_cycle_counter += 1
+
+        interval = lm.get("sweep_interval_cycles", 6)
+        if self.lan_cycle_counter % interval != 1:
+            return
+
+        print("\033[32m[+] Barrido de Red Local (sin root, base IP):\033[0m")
+        devices = get_lan_devices()
+        if not devices:
+            print("  \033[2m[i] Sin respuesta en la subred (¿wlan0 sin IP asignada?).\033[0m")
+            return
+
+        known = set(lm.get("known_ips", []))
+
+        if not known and lm.get("auto_baseline", True) and not getattr(self, "lan_baselined", False):
+            new_known = sorted(set(d["ip"] for d in devices))
+            lm["known_ips"] = new_known
+            CONFIG["lan_monitoring"] = lm
+            save_config(CONFIG)
+            self.lan_baselined = True
+            msg = f"Baseline LAN creado con {len(new_known)} IP(s) conocida(s)."
+            self.log_and_print("INFO", "LAN", msg, f"  \033[32m[+] {msg}\033[0m", notify=False)
+            return
+
+        print(f"  > {len(devices)} dispositivo(s) respondieron en la subred.")
+        if not hasattr(self, "alerted_ips"):
+            self.alerted_ips = set()
+
+        for d in devices:
+            ip = d["ip"]
+            tag = "conocido" if ip in known else "\033[1;31mDESCONOCIDO\033[0m"
+            print(f"    > {ip}  [{tag}]")
+
+            if ip not in known and ip not in self.alerted_ips:
+                msg = f"Dispositivo DESCONOCIDO respondiendo en la red: IP {ip} (fuera del baseline)."
+                self.log_and_print("CRITICAL", "LAN_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
+                self.alerted_ips.add(ip)
 
     def shutdown(self):
         self.running = False
