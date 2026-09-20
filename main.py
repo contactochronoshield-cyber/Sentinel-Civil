@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "1.7.0-COMMUNITY"
+VERSION = "1.8.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -45,6 +45,12 @@ DEFAULT_CONFIG = {
         "trend_drop_dbm": 15,
         "trend_window_cycles": 6
     },
+    "vpn_monitoring": {
+        "enabled": True,
+        "manual_interfaces": [],
+        "handshake_stale_seconds": 180,
+        "latency_compare_target": "1.1.1.1"
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -63,6 +69,7 @@ def load_config():
     merged["telegram"] = {**DEFAULT_CONFIG["telegram"], **cfg.get("telegram", {})}
     merged["central_reporting"] = {**DEFAULT_CONFIG["central_reporting"], **cfg.get("central_reporting", {})}
     merged["signal_monitoring"] = {**DEFAULT_CONFIG["signal_monitoring"], **cfg.get("signal_monitoring", {})}
+    merged["vpn_monitoring"] = {**DEFAULT_CONFIG["vpn_monitoring"], **cfg.get("vpn_monitoring", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
@@ -203,6 +210,56 @@ def get_wifi_signal():
         return None
 
 # ---------------------------------------------------------------------------
+# AUDITORIA DE TUNEL VPN - WireGuard, Tailscale, o cualquier tun*
+# ---------------------------------------------------------------------------
+def get_tunnel_interfaces(manual_list=None):
+    """Detecta interfaces de tunel activas (wg*, tailscale*, tun*, utun*)."""
+    if manual_list:
+        return manual_list
+    try:
+        output = subprocess.check_output(
+            "ip -o link show 2>/dev/null | awk -F': ' '{print $2}'",
+            shell=True
+        ).decode("utf-8")
+        names = [n.strip() for n in output.split("\n") if n.strip()]
+        prefixes = ("wg", "tailscale", "tun", "utun")
+        return [n for n in names if n.lower().startswith(prefixes)]
+    except Exception:
+        return []
+
+def get_wg_handshake_age(iface):
+    """Devuelve segundos desde el ultimo handshake de WireGuard, o None."""
+    try:
+        output = subprocess.check_output(
+            f"wg show {iface} latest-handshakes 2>/dev/null",
+            shell=True
+        ).decode("utf-8").strip()
+        if not output:
+            return None
+        parts = output.split()
+        if len(parts) < 2:
+            return None
+        ts = int(parts[1])
+        if ts == 0:
+            return None
+        return int(time.time()) - ts
+    except Exception:
+        return None
+
+def ping_via_interface(iface, target, count=2):
+    """Latencia promedio en ms haciendo ping a traves de una interfaz especifica."""
+    try:
+        cmd = f"ping -I {iface} -c {count} -W 2 {target} 2>/dev/null"
+        output = subprocess.check_output(cmd, shell=True).decode("utf-8")
+        for line in output.split("\n"):
+            if "min/avg/max" in line or "rtt" in line:
+                if "/" in line:
+                    return float(line.split("=")[-1].split("/")[1])
+        return None
+    except Exception:
+        return None
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -275,6 +332,7 @@ class CivicKernel:
             self.check_network_interfaces()
             loss, latency = self.check_layer3_telemetry()
             rssi = self.check_signal_quality()
+            self.check_vpn_tunnels()
 
             db_insert_metric(cpu, ram, loss, latency, rssi)
             send_central_report(metrics=[{
@@ -444,6 +502,38 @@ class CivicKernel:
                 self.rssi_history = []
 
         return rssi
+
+    def check_vpn_tunnels(self):
+        vm = CONFIG.get("vpn_monitoring", {})
+        if not vm.get("enabled"):
+            return
+
+        ifaces = get_tunnel_interfaces(vm.get("manual_interfaces") or None)
+        if not ifaces:
+            return
+
+        print("\033[32m[+] Auditoria de Tunel VPN:\033[0m")
+        stale_th = vm.get("handshake_stale_seconds", 180)
+        target = vm.get("latency_compare_target", "1.1.1.1")
+
+        for iface in ifaces:
+            print(f"  > Tunel detectado: \033[1;36m{iface}\033[0m")
+
+            if iface.lower().startswith("wg"):
+                age = get_wg_handshake_age(iface)
+                if age is None:
+                    print("    - Handshake: sin datos (wg-tools no disponible o sin peers)")
+                else:
+                    print(f"    - Ultimo handshake: hace {age}s")
+                    if age > stale_th:
+                        msg = f"Tunel {iface}: handshake WireGuard sin renovar hace {age}s (umbral: {stale_th}s). Posible tunel caido."
+                        self.log_and_print("WARNING", "VPN", msg, f"    \033[1;33m[WARN] {msg}\033[0m")
+
+            latency = ping_via_interface(iface, target)
+            if latency is not None:
+                print(f"    - Latencia via tunel ({target}): {latency} ms")
+            else:
+                print(f"    - Latencia via tunel: sin respuesta (tunel posiblemente caido)")
 
     def shutdown(self):
         self.running = False
