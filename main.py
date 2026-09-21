@@ -62,6 +62,13 @@ DEFAULT_CONFIG = {
         "gateway_ip": "",
         "snapshot_interval_cycles": 6
     },
+    "cpe_security": {
+        "enabled": True,
+        "scan_interval_cycles": 12,
+        "risky_ports": [21, 23, 7547],
+        "admin_ports": [80, 443, 8080],
+        "trusted_dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"]
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -83,6 +90,7 @@ def load_config():
     merged["vpn_monitoring"] = {**DEFAULT_CONFIG["vpn_monitoring"], **cfg.get("vpn_monitoring", {})}
     merged["lan_monitoring"] = {**DEFAULT_CONFIG["lan_monitoring"], **cfg.get("lan_monitoring", {})}
     merged["topology"] = {**DEFAULT_CONFIG["topology"], **cfg.get("topology", {})}
+    merged["cpe_security"] = {**DEFAULT_CONFIG["cpe_security"], **cfg.get("cpe_security", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
@@ -367,6 +375,64 @@ def print_topology_tree(snapshot):
     print(f"          └─ Red Local: {lan['known']} conocido(s), {unknown_tag}")
 
 # ---------------------------------------------------------------------------
+# CPE SECURITY MONITORING - clasificacion de riesgo del gateway/router
+# ---------------------------------------------------------------------------
+RISKY_PORT_NAMES = {21: "FTP", 23: "Telnet", 7547: "TR-069/CWMP"}
+
+def scan_gateway_ports(gateway_ip, ports, timeout=1.0):
+    import socket
+    open_ports = []
+    for port in ports:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            result = s.connect_ex((gateway_ip, port))
+            s.close()
+            if result == 0:
+                open_ports.append(port)
+        except Exception:
+            pass
+    return open_ports
+
+def get_device_dns_servers():
+    dns = []
+    for prop in ["net.dns1", "net.dns2"]:
+        try:
+            val = subprocess.check_output(f"getprop {prop} 2>/dev/null", shell=True).decode("utf-8").strip()
+            if val:
+                dns.append(val)
+        except Exception:
+            pass
+    return dns
+
+def classify_cpe_risk(open_ports, dns_servers, gateway_ip, cfg):
+    risky_ports = cfg.get("risky_ports", [21, 23, 7547])
+    admin_ports = cfg.get("admin_ports", [80, 443, 8080])
+    trusted_dns = cfg.get("trusted_dns", [])
+
+    risky_found = [p for p in open_ports if p in risky_ports]
+    admin_found = [p for p in open_ports if p in admin_ports]
+
+    dns_suspicious = False
+    if gateway_ip and dns_servers:
+        dns_suspicious = all(
+            d != gateway_ip and d not in trusted_dns for d in dns_servers
+        )
+
+    reasons = []
+    if risky_found:
+        names = [RISKY_PORT_NAMES.get(p, str(p)) for p in risky_found]
+        reasons.append(f"Puerto(s) de riesgo abiertos: {', '.join(names)}")
+    if dns_suspicious:
+        reasons.append(f"DNS inesperado (no es el gateway ni uno confiable): {', '.join(dns_servers)}")
+
+    if risky_found or dns_suspicious:
+        return "HIGH RISK", reasons
+    if admin_found:
+        return "COMPENSATABLE", [f"Panel de administracion expuesto en puerto(s): {admin_found}"]
+    return "SUPPORTED", []
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -442,6 +508,7 @@ class CivicKernel:
             self.check_vpn_tunnels()
             self.check_lan_devices()
             self.build_and_print_topology(cpu, ram, loss, latency)
+            self.check_cpe_security(getattr(self, 'last_gateway_ip', None))
 
             db_insert_metric(cpu, ram, loss, latency, rssi)
             send_central_report(metrics=[{
@@ -705,6 +772,7 @@ class CivicKernel:
         lm = CONFIG.get("lan_monitoring", {})
         lan_prefix = get_local_subnet_prefix()
         gateway_ip = tp.get("gateway_ip") or guess_gateway_ip(lan_prefix)
+        self.last_gateway_ip = gateway_ip
 
         known_ips = set(lm.get("known_ips", []))
         last_lan_devices = getattr(self, "last_lan_devices", [])
@@ -738,6 +806,39 @@ class CivicKernel:
         save_topology_snapshot(snapshot)
         print("\033[32m[+] Mapa de Topologia de Red:\033[0m")
         print_topology_tree(snapshot)
+
+    def check_cpe_security(self, gateway_ip):
+        cs = CONFIG.get("cpe_security", {})
+        if not cs.get("enabled") or not gateway_ip:
+            return
+
+        if not hasattr(self, "cpe_cycle_counter"):
+            self.cpe_cycle_counter = 0
+        self.cpe_cycle_counter += 1
+        interval = cs.get("scan_interval_cycles", 12)
+        if self.cpe_cycle_counter % interval != 1:
+            return
+
+        print("\033[32m[+] CPE Security Monitoring (Gateway):\033[0m")
+        all_ports = list(set(cs.get("risky_ports", []) + cs.get("admin_ports", [])))
+        open_ports = scan_gateway_ports(gateway_ip, all_ports)
+        dns_servers = get_device_dns_servers()
+
+        risk, reasons = classify_cpe_risk(open_ports, dns_servers, gateway_ip, cs)
+        self.last_cpe_risk = risk
+
+        color = {"SUPPORTED": "\033[1;32m", "COMPENSATABLE": "\033[1;33m", "HIGH RISK": "\033[1;31m"}.get(risk, "")
+        print(f"  > Clasificacion: {color}{risk}\033[0m")
+        print(f"  > Puertos abiertos detectados: {open_ports if open_ports else 'ninguno'}")
+        print(f"  > DNS del dispositivo: {dns_servers if dns_servers else 'no disponible'}")
+
+        if risk == "HIGH RISK":
+            for r in reasons:
+                msg = f"CPE riesgo alto ({gateway_ip}): {r}"
+                self.log_and_print("CRITICAL", "CPE_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
+        elif risk == "COMPENSATABLE":
+            for r in reasons:
+                print(f"    \033[1;33m[i] {r}\033[0m")
 
     def shutdown(self):
         self.running = False
