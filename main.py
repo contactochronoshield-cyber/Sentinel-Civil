@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "1.9.0-COMMUNITY"
+VERSION = "2.0.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -57,6 +57,11 @@ DEFAULT_CONFIG = {
         "auto_baseline": True,
         "sweep_interval_cycles": 6
     },
+    "topology": {
+        "enabled": True,
+        "gateway_ip": "",
+        "snapshot_interval_cycles": 6
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -77,6 +82,7 @@ def load_config():
     merged["signal_monitoring"] = {**DEFAULT_CONFIG["signal_monitoring"], **cfg.get("signal_monitoring", {})}
     merged["vpn_monitoring"] = {**DEFAULT_CONFIG["vpn_monitoring"], **cfg.get("vpn_monitoring", {})}
     merged["lan_monitoring"] = {**DEFAULT_CONFIG["lan_monitoring"], **cfg.get("lan_monitoring", {})}
+    merged["topology"] = {**DEFAULT_CONFIG["topology"], **cfg.get("topology", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
@@ -322,6 +328,45 @@ def get_lan_devices():
     return found
 
 # ---------------------------------------------------------------------------
+# TOPOLOGIA DE RED - mapa de dependencias Internet -> Gateway -> VPN -> LAN
+# ---------------------------------------------------------------------------
+TOPOLOGY_FILE = os.path.join(BASE_DIR, "topology.json")
+
+def guess_gateway_ip(lan_prefix):
+    if not lan_prefix:
+        return None
+    return f"{lan_prefix}.1"
+
+def save_topology_snapshot(snapshot):
+    try:
+        with open(TOPOLOGY_FILE, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error guardando topology.json: {e}")
+
+def print_topology_tree(snapshot):
+    wan = snapshot["wan"]
+    wan_icon = "\033[1;32m●\033[0m" if wan["status"] == "up" else "\033[1;31m●\033[0m"
+    print(f"  {wan_icon} Internet (WAN)  [{wan['latency_ms']}ms, {wan['loss_pct']}% loss]")
+
+    gw = snapshot["gateway"]
+    gw_icon = "\033[1;32m●\033[0m" if gw["ip"] else "\033[2m○\033[0m"
+    gw_label = gw["ip"] if gw["ip"] else "desconocido"
+    print(f"  └─ {gw_icon} Gateway ({gw_label})")
+
+    tunnels = snapshot["vpn_tunnels"]
+    if tunnels:
+        for t in tunnels:
+            t_icon = "\033[1;32m●\033[0m" if t["healthy"] else "\033[1;31m●\033[0m"
+            print(f"      └─ {t_icon} Tunel VPN: {t['iface']}")
+    else:
+        print(f"      └─ \033[2m○ Sin tuneles VPN activos\033[0m")
+
+    lan = snapshot["lan"]
+    unknown_tag = f"\033[1;31m{lan['unknown']} desconocido(s)\033[0m" if lan["unknown"] > 0 else "0 desconocidos"
+    print(f"          └─ Red Local: {lan['known']} conocido(s), {unknown_tag}")
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -396,6 +441,7 @@ class CivicKernel:
             rssi = self.check_signal_quality()
             self.check_vpn_tunnels()
             self.check_lan_devices()
+            self.build_and_print_topology(cpu, ram, loss, latency)
 
             db_insert_metric(cpu, ram, loss, latency, rssi)
             send_central_report(metrics=[{
@@ -613,6 +659,7 @@ class CivicKernel:
 
         print("\033[32m[+] Barrido de Red Local (sin root, base IP):\033[0m")
         devices = get_lan_devices()
+        self.last_lan_devices = devices
         if not devices:
             print("  \033[2m[i] Sin respuesta en la subred (¿wlan0 sin IP asignada?).\033[0m")
             return
@@ -642,6 +689,55 @@ class CivicKernel:
                 msg = f"Dispositivo DESCONOCIDO respondiendo en la red: IP {ip} (fuera del baseline)."
                 self.log_and_print("CRITICAL", "LAN_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
                 self.alerted_ips.add(ip)
+
+    def build_and_print_topology(self, cpu, ram, wan_loss, wan_latency):
+        tp = CONFIG.get("topology", {})
+        if not tp.get("enabled"):
+            return
+
+        if not hasattr(self, "topo_cycle_counter"):
+            self.topo_cycle_counter = 0
+        self.topo_cycle_counter += 1
+        interval = tp.get("snapshot_interval_cycles", 6)
+        if self.topo_cycle_counter % interval != 1:
+            return
+
+        lm = CONFIG.get("lan_monitoring", {})
+        lan_prefix = get_local_subnet_prefix()
+        gateway_ip = tp.get("gateway_ip") or guess_gateway_ip(lan_prefix)
+
+        known_ips = set(lm.get("known_ips", []))
+        last_lan_devices = getattr(self, "last_lan_devices", [])
+        lan_known = sum(1 for d in last_lan_devices if d.get("ip") in known_ips)
+        lan_unknown = sum(1 for d in last_lan_devices if d.get("ip") not in known_ips)
+
+        vm = CONFIG.get("vpn_monitoring", {})
+        tunnel_ifaces = get_tunnel_interfaces(vm.get("manual_interfaces") or None) if vm.get("enabled") else []
+        tunnels_info = []
+        for iface in tunnel_ifaces:
+            healthy = True
+            if iface.lower().startswith("wg"):
+                age = get_wg_handshake_age(iface)
+                stale_th = vm.get("handshake_stale_seconds", 180)
+                healthy = age is not None and age <= stale_th
+            tunnels_info.append({"iface": iface, "healthy": healthy})
+
+        snapshot = {
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "node_name": CONFIG["node_name"],
+            "wan": {
+                "status": "up" if (wan_loss is not None and wan_loss < 100) else "down",
+                "latency_ms": wan_latency,
+                "loss_pct": wan_loss
+            },
+            "gateway": {"ip": gateway_ip},
+            "vpn_tunnels": tunnels_info,
+            "lan": {"known": lan_known, "unknown": lan_unknown}
+        }
+
+        save_topology_snapshot(snapshot)
+        print("\033[32m[+] Mapa de Topologia de Red:\033[0m")
+        print_topology_tree(snapshot)
 
     def shutdown(self):
         self.running = False
