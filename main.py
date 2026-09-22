@@ -79,6 +79,12 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "check_interval_cycles": 6
     },
+    "predictive_health": {
+        "enabled": True,
+        "latency_critical_ms": 200,
+        "history_window": 6,
+        "alert_within_minutes": 30
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -103,6 +109,7 @@ def load_config():
     merged["cpe_security"] = {**DEFAULT_CONFIG["cpe_security"], **cfg.get("cpe_security", {})}
     merged["dual_wan"] = {**DEFAULT_CONFIG["dual_wan"], **cfg.get("dual_wan", {})}
     merged["sim_security"] = {**DEFAULT_CONFIG["sim_security"], **cfg.get("sim_security", {})}
+    merged["predictive_health"] = {**DEFAULT_CONFIG["predictive_health"], **cfg.get("predictive_health", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
@@ -512,6 +519,31 @@ def get_telephony_info():
         return None
 
 # ---------------------------------------------------------------------------
+# PREDICCION DE DEGRADACION - regresion lineal simple sobre latencia WAN
+# ---------------------------------------------------------------------------
+def predict_degradation(history, critical_threshold):
+    n = len(history)
+    if n < 4:
+        return None
+    xs = list(range(n))
+    mean_x = sum(xs) / n
+    mean_y = sum(history) / n
+    num = sum((xs[i] - mean_x) * (history[i] - mean_y) for i in range(n))
+    den = sum((xs[i] - mean_x) ** 2 for i in range(n))
+    if den == 0:
+        return None
+    slope = num / den
+    if slope <= 0:
+        return None
+    current = history[-1]
+    if current >= critical_threshold:
+        return None
+    cycles_to_critical = (critical_threshold - current) / slope
+    if cycles_to_critical <= 0:
+        return None
+    return {"slope_per_cycle": slope, "cycles_to_critical": cycles_to_critical}
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -590,6 +622,8 @@ class CivicKernel:
             self.check_cpe_security(getattr(self, 'last_gateway_ip', None))
             self.check_dual_wan_health()
             self.check_sim_identity()
+            self.check_predictive_health(latency)
+            self.print_health_summary(loss, rssi)
 
             db_insert_metric(cpu, ram, loss, latency, rssi)
             send_central_report(metrics=[{
@@ -861,6 +895,7 @@ class CivicKernel:
             return
 
         print(f"  > {len(devices)} dispositivo(s) respondieron en la subred.")
+        self.last_unknown_count = sum(1 for d in devices if d["ip"] not in known)
         if not hasattr(self, "alerted_ips"):
             self.alerted_ips = set()
         if not hasattr(self, "presence_history"):
@@ -1043,6 +1078,66 @@ class CivicKernel:
             msg = f"Cambio de operador/SIM detectado: {self.last_sim_operator} -> {operator}. Posible SIM-swap."
             self.log_and_print("CRITICAL", "SIM_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
         self.last_sim_operator = operator
+
+    def check_predictive_health(self, latency_val):
+        ph = CONFIG.get("predictive_health", {})
+        if not ph.get("enabled") or latency_val is None:
+            return
+
+        if not hasattr(self, "latency_history"):
+            self.latency_history = []
+        window = ph.get("history_window", 6)
+        self.latency_history.append(latency_val)
+        if len(self.latency_history) > window:
+            self.latency_history.pop(0)
+
+        critical = ph.get("latency_critical_ms", 200)
+        result = predict_degradation(self.latency_history, critical)
+        if not result:
+            return
+
+        interval = CONFIG.get("check_interval_seconds", 10)
+        eta_seconds = result["cycles_to_critical"] * interval
+        eta_minutes = eta_seconds / 60
+        alert_window = ph.get("alert_within_minutes", 30)
+
+        if eta_minutes <= alert_window:
+            msg = (f"Prediccion de degradacion: la latencia WAN sube ~{result['slope_per_cycle']:.1f}ms por ciclo. "
+                   f"Podria alcanzar {critical}ms en ~{eta_minutes:.1f} minutos si continua la tendencia.")
+            self.log_and_print("WARNING", "PREDICTIVE", msg, f"\033[1;33m[i] {msg}\033[0m", notify=False)
+
+    def print_health_summary(self, wan_loss, rssi):
+        sm = CONFIG.get("signal_monitoring", {})
+        warn_th = sm.get("rssi_warning_threshold", -75)
+        crit_th = sm.get("rssi_critical_threshold", -85)
+
+        internet_status = "\033[1;32m🟢\033[0m" if (wan_loss is not None and wan_loss == 0) else "\033[1;31m🔴\033[0m"
+
+        if rssi is None:
+            wifi_status = "\033[2m⚪\033[0m"
+        elif rssi <= crit_th:
+            wifi_status = "\033[1;31m🔴\033[0m"
+        elif rssi <= warn_th:
+            wifi_status = "\033[1;33m🟡\033[0m"
+        else:
+            wifi_status = "\033[1;32m🟢\033[0m"
+
+        cpe_risk = getattr(self, "last_cpe_risk", None)
+        if cpe_risk == "HIGH RISK":
+            security_status = "\033[1;31m🔴\033[0m"
+        elif cpe_risk == "COMPENSATABLE":
+            security_status = "\033[1;33m🟡\033[0m"
+        else:
+            security_status = "\033[1;32m🟢\033[0m"
+
+        unknown_count = getattr(self, "last_unknown_count", 0)
+        lan_status = "\033[1;31m🔴\033[0m" if unknown_count > 0 else "\033[1;32m🟢\033[0m"
+
+        print("\033[32m[+] Resumen del Sistema:\033[0m")
+        print(f"  Internet      {internet_status}")
+        print(f"  WiFi/Señal    {wifi_status}")
+        print(f"  Seguridad CPE {security_status}")
+        print(f"  Red Local     {lan_status}" + (f"  ({unknown_count} desconocido(s))" if unknown_count else ""))
 
     def shutdown(self):
         self.running = False
