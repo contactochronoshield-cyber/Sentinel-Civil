@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "2.1.0-COMMUNITY"
+VERSION = "2.2.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -229,11 +229,6 @@ def send_central_report(events=None, metrics=None):
         logger.error(f"Error reportando al servidor central: {e}")
 
 def get_wifi_signal():
-    """
-    Devuelve un dict {rssi, ssid, link_speed_mbps} o None si no se pudo leer.
-    Requiere el paquete termux-api instalado (pkg install termux-api) y la
-    app Termux:API en el teléfono.
-    """
     try:
         output = subprocess.check_output(
             ["termux-wifi-connectioninfo"], stderr=subprocess.DEVNULL, timeout=5
@@ -245,6 +240,7 @@ def get_wifi_signal():
         return {
             "rssi": int(rssi),
             "ssid": data.get("ssid", "?"),
+            "bssid": data.get("bssid", "?"),
             "link_speed_mbps": data.get("link_speed_mbps")
         }
     except Exception:
@@ -759,7 +755,19 @@ class CivicKernel:
             return None
 
         rssi = signal["rssi"]
-        print(f"  > SSID: {signal['ssid']} | RSSI: \033[1;36m{rssi} dBm\033[0m | Velocidad: {signal.get('link_speed_mbps', '?')} Mbps")
+        bssid = signal.get("bssid", "?")
+        print(f"  > SSID: {signal['ssid']} | BSSID: {bssid} | RSSI: \033[1;36m{rssi} dBm\033[0m | Velocidad: {signal.get('link_speed_mbps', '?')} Mbps")
+
+        ssid = signal["ssid"]
+        if not hasattr(self, "known_bssids"):
+            self.known_bssids = {}
+        if bssid and bssid != "?":
+            if ssid in self.known_bssids and self.known_bssids[ssid] != bssid:
+                old_bssid = self.known_bssids[ssid]
+                msg = (f"POSIBLE EVIL TWIN / ROGUE AP: la red '{ssid}' cambio de BSSID "
+                       f"{old_bssid} -> {bssid}. Alguien pudo clonar tu red WiFi.")
+                self.log_and_print("CRITICAL", "WIFI_TRUST", msg, f"  \033[1;31m[CRITICAL] {msg}\033[0m")
+            self.known_bssids[ssid] = bssid
 
         warn_th = sm.get("rssi_warning_threshold", -75)
         crit_th = sm.get("rssi_critical_threshold", -85)
