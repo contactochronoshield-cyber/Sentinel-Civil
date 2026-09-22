@@ -69,6 +69,16 @@ DEFAULT_CONFIG = {
         "admin_ports": [80, 443, 8080],
         "trusted_dns": ["1.1.1.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"]
     },
+    "dual_wan": {
+        "enabled": True,
+        "check_interval_cycles": 6,
+        "target": "1.1.1.1",
+        "interfaces": ["wlan0", "rmnet0", "rmnet_data0"]
+    },
+    "sim_security": {
+        "enabled": True,
+        "check_interval_cycles": 6
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -91,6 +101,8 @@ def load_config():
     merged["lan_monitoring"] = {**DEFAULT_CONFIG["lan_monitoring"], **cfg.get("lan_monitoring", {})}
     merged["topology"] = {**DEFAULT_CONFIG["topology"], **cfg.get("topology", {})}
     merged["cpe_security"] = {**DEFAULT_CONFIG["cpe_security"], **cfg.get("cpe_security", {})}
+    merged["dual_wan"] = {**DEFAULT_CONFIG["dual_wan"], **cfg.get("dual_wan", {})}
+    merged["sim_security"] = {**DEFAULT_CONFIG["sim_security"], **cfg.get("sim_security", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
@@ -473,6 +485,37 @@ def classify_wan_link_type(latency_ms, jitter_ms):
     return "Alta latencia (revisar)"
 
 # ---------------------------------------------------------------------------
+# DUAL-WAN HEALTH CHECK (estilo SD-WAN) - WiFi + datos moviles simultaneos
+# ---------------------------------------------------------------------------
+def get_interface_ip(iface):
+    try:
+        output = subprocess.check_output("ifconfig 2>/dev/null", shell=True).decode("utf-8")
+        blocks = output.split("\n\n")
+        for block in blocks:
+            if block.strip().startswith(iface + ":"):
+                for line in block.split("\n"):
+                    parts = line.strip().split()
+                    if "inet" in parts:
+                        idx = parts.index("inet")
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
+        return None
+    except Exception:
+        return None
+
+# ---------------------------------------------------------------------------
+# SIM / OPERADOR - deteccion de cambio inesperado (anti SIM-swap)
+# ---------------------------------------------------------------------------
+def get_telephony_info():
+    try:
+        output = subprocess.check_output(
+            ["termux-telephony-deviceinfo"], stderr=subprocess.DEVNULL, timeout=5
+        ).decode("utf-8")
+        return json.loads(output)
+    except Exception:
+        return None
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -549,6 +592,8 @@ class CivicKernel:
             self.check_lan_devices()
             self.build_and_print_topology(cpu, ram, loss, latency)
             self.check_cpe_security(getattr(self, 'last_gateway_ip', None))
+            self.check_dual_wan_health()
+            self.check_sim_identity()
 
             db_insert_metric(cpu, ram, loss, latency, rssi)
             send_central_report(metrics=[{
@@ -810,10 +855,27 @@ class CivicKernel:
         print(f"  > {len(devices)} dispositivo(s) respondieron en la subred.")
         if not hasattr(self, "alerted_ips"):
             self.alerted_ips = set()
+        if not hasattr(self, "presence_history"):
+            self.presence_history = {}
+
+        responding_ips = set(d["ip"] for d in devices)
+        for ip in known:
+            hist = self.presence_history.setdefault(ip, [])
+            hist.append(ip in responding_ips)
+            if len(hist) > 5:
+                hist.pop(0)
 
         for d in devices:
             ip = d["ip"]
-            tag = "conocido" if ip in known else "\033[1;31mDESCONOCIDO\033[0m"
+            if ip in known:
+                hist = self.presence_history.get(ip, [])
+                transitions = sum(1 for i in range(1, len(hist)) if hist[i] != hist[i-1])
+                if len(hist) >= 3 and transitions >= 2:
+                    tag = "\033[1;36mconocido, intermitente (probable IoT/wearable)\033[0m"
+                else:
+                    tag = "conocido"
+            else:
+                tag = "\033[1;31mDESCONOCIDO\033[0m"
             print(f"    > {ip}  [{tag}]")
 
             if ip not in known and ip not in self.alerted_ips:
@@ -911,6 +973,68 @@ class CivicKernel:
         elif risk == "COMPENSATABLE":
             for r in reasons:
                 print(f"    \033[1;33m[i] {r}\033[0m")
+
+    def check_dual_wan_health(self):
+        dw = CONFIG.get("dual_wan", {})
+        if not dw.get("enabled"):
+            return
+        if not hasattr(self, "dualwan_cycle_counter"):
+            self.dualwan_cycle_counter = 0
+        self.dualwan_cycle_counter += 1
+        interval = dw.get("check_interval_cycles", 6)
+        if self.dualwan_cycle_counter % interval != 1:
+            return
+
+        target = dw.get("target", "1.1.1.1")
+        candidates = dw.get("interfaces", ["wlan0", "rmnet0", "rmnet_data0"])
+        results = {}
+        for iface in candidates:
+            ip = get_interface_ip(iface)
+            if not ip:
+                continue
+            latency = ping_via_interface(iface, target, count=2)
+            results[iface] = {"ip": ip, "latency_ms": latency}
+
+        if len(results) < 2:
+            return
+
+        print("\033[32m[+] Dual-WAN Health Check (estilo SD-WAN):\033[0m")
+        for iface, info in results.items():
+            status = f"{info['latency_ms']}ms" if info["latency_ms"] is not None else "\033[1;31msin respuesta\033[0m"
+            print(f"  > {iface} ({info['ip']}): {status}")
+
+        reachable = {k: v for k, v in results.items() if v["latency_ms"] is not None}
+        if reachable:
+            best_iface = min(reachable, key=lambda k: reachable[k]["latency_ms"])
+            print(f"  > \033[1;32mMejor camino actual: {best_iface}\033[0m")
+
+    def check_sim_identity(self):
+        ss = CONFIG.get("sim_security", {})
+        if not ss.get("enabled"):
+            return
+        if not hasattr(self, "sim_cycle_counter"):
+            self.sim_cycle_counter = 0
+        self.sim_cycle_counter += 1
+        interval = ss.get("check_interval_cycles", 6)
+        if self.sim_cycle_counter % interval != 1:
+            return
+
+        info = get_telephony_info()
+        if not info:
+            return
+
+        operator = info.get("network_operator_name") or info.get("sim_operator_name")
+        sim_state = info.get("sim_state", "?")
+        print(f"\033[32m[+] SIM / Operador:\033[0m {operator} | Estado: {sim_state}")
+
+        if not hasattr(self, "last_sim_operator"):
+            self.last_sim_operator = operator
+            return
+
+        if operator and self.last_sim_operator and operator != self.last_sim_operator:
+            msg = f"Cambio de operador/SIM detectado: {self.last_sim_operator} -> {operator}. Posible SIM-swap."
+            self.log_and_print("CRITICAL", "SIM_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
+        self.last_sim_operator = operator
 
     def shutdown(self):
         self.running = False
