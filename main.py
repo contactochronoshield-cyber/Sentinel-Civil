@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "2.0.0-COMMUNITY"
+VERSION = "2.1.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -457,6 +457,22 @@ def classify_cpe_risk(open_ports, dns_servers, gateway_ip, cfg):
     return "SUPPORTED", []
 
 # ---------------------------------------------------------------------------
+# CLASIFICACION DE TIPO DE ENLACE WAN (fibra/4G/satelital) por latencia+jitter
+# ---------------------------------------------------------------------------
+def classify_wan_link_type(latency_ms, jitter_ms):
+    if latency_ms is None:
+        return "Desconocido"
+    if latency_ms >= 400:
+        return "Satelital GEO (alta latencia constante)"
+    if 20 <= latency_ms <= 80 and jitter_ms is not None and jitter_ms >= 15:
+        return "Posible satelital LEO (Starlink) o enlace inestable"
+    if latency_ms < 20:
+        return "Fibra/Cable (baja latencia)"
+    if latency_ms < 80:
+        return "WiFi/4G-5G tipico"
+    return "Alta latencia (revisar)"
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -637,14 +653,38 @@ class CivicKernel:
             loss_val = float(loss.replace('%', ''))
 
             avg_latency = "N/A"
+            jitter_val = None
             if "rtt" in output or "min/avg/max" in output:
                 tail = output.split('\n')[-2] if output.split('\n')[-1] == "" else output.split('\n')[-1]
                 if "/" in tail:
-                    avg_latency = tail.split('/')[4]
+                    parts = tail.split('/')
+                    avg_latency = parts[4]
                     latency_val = float(avg_latency)
+                    if len(parts) > 6:
+                        try:
+                            jitter_val = float(parts[6].split()[0])
+                        except Exception:
+                            jitter_val = None
 
             latency_display = f"{avg_latency} ms" if latency_val is not None else "N/A"
             print(f"  > Enlace WAN íntegro ({target}) | Pérdida: \033[1;32m{loss}\033[0m | Latencia Promedio: \033[1;36m{latency_display}\033[0m")
+
+            if not hasattr(self, "link_samples"):
+                self.link_samples = []
+            if latency_val is not None:
+                self.link_samples.append((latency_val, jitter_val or 0))
+                if len(self.link_samples) > 3:
+                    self.link_samples.pop(0)
+
+            if len(self.link_samples) >= 2:
+                avg_lat = sum(s[0] for s in self.link_samples) / len(self.link_samples)
+                avg_jit = sum(s[1] for s in self.link_samples) / len(self.link_samples)
+                link_type = classify_wan_link_type(avg_lat, avg_jit)
+                self.last_link_type = link_type
+                print(f"  > Tipo de enlace detectado: \033[1;35m{link_type}\033[0m "
+                      f"(promedio {len(self.link_samples)} muestras: {avg_lat:.1f}ms, jitter {avg_jit:.1f}ms)")
+            else:
+                print(f"  \033[2m[i] Tipo de enlace: acumulando muestras para clasificar con confianza...\033[0m")
             if loss_val and loss_val > 0:
                 msg = f"Degradación de enlace: Packet Loss del {loss} detectado en WAN."
                 self.log_and_print("WARNING", "WAN", msg, f"  \033[1;33m[WARN] {msg}\033[0m")
