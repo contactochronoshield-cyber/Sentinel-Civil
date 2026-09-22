@@ -319,6 +319,30 @@ def _ping_host(ip):
     except Exception:
         return None
 
+def fingerprint_device(ip):
+    import socket
+    hostname = None
+    try:
+        hostname = socket.gethostbyaddr(ip)[0]
+    except Exception:
+        hostname = None
+
+    common_ports = {80: "HTTP/web", 443: "HTTPS", 8080: "HTTP-alt",
+                    554: "camara IP (RTSP)", 9100: "impresora",
+                    62078: "iOS/iPhone", 5000: "IoT/UPnP", 22: "SSH"}
+    open_ports = []
+    for port in common_ports:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            if s.connect_ex((ip, port)) == 0:
+                open_ports.append(f"{port} ({common_ports[port]})")
+            s.close()
+        except Exception:
+            pass
+
+    return {"hostname": hostname, "open_ports": open_ports}
+
 def get_lan_devices():
     import concurrent.futures
     prefix = get_local_subnet_prefix()
@@ -753,7 +777,15 @@ class CivicKernel:
             print(f"    > {ip}  [{tag}]")
 
             if ip not in known and ip not in self.alerted_ips:
-                msg = f"Dispositivo DESCONOCIDO respondiendo en la red: IP {ip} (fuera del baseline)."
+                fp = fingerprint_device(ip)
+                fp_parts = []
+                if fp["hostname"]:
+                    fp_parts.append(f"host={fp['hostname']}")
+                if fp["open_ports"]:
+                    fp_parts.append(f"puertos={', '.join(fp['open_ports'])}")
+                fp_str = " | " + " ".join(fp_parts) if fp_parts else " | sin datos de identificacion"
+
+                msg = f"Dispositivo DESCONOCIDO respondiendo en la red: IP {ip} (fuera del baseline).{fp_str}"
                 self.log_and_print("CRITICAL", "LAN_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
                 self.alerted_ips.add(ip)
 
