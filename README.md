@@ -2,10 +2,12 @@
 
 **Monitoreo de infraestructura anti-sabotaje que corre en un celular viejo con Termux — sin nube, sin dependencias pesadas, sin que nadie más vea tus datos.**
 
-![version](https://img.shields.io/badge/version-2.1.0-blue)
+![version](https://img.shields.io/badge/version-2.3.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
 ![platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20Android-lightgrey)
+![CodeQL](https://github.com/contactochronoshield-cyber/Sentinel-Civil/actions/workflows/codeql.yml/badge.svg)
+![Gitleaks](https://github.com/contactochronoshield-cyber/Sentinel-Civil/actions/workflows/gitleaks.yml/badge.svg)
 
 ---
 
@@ -36,6 +38,10 @@ Es la pieza base de código abierto detrás de la infraestructura de [Chrono Shi
 - Dual-WAN health check estilo SD-WAN (WiFi + datos moviles simultaneos)
 - Deteccion de cambio de operador/SIM (anti SIM-swap)
 - Dashboard web "Sentinel Command" con KPIs y tarjetas de nodo en tiempo real
+- Wi-Fi Trust Monitor: detecta Evil Twin/Rogue AP si el BSSID de tu red cambia inesperadamente
+- Prediccion de degradacion de enlace (regresion lineal sobre latencia, avisa antes de que se caiga del todo)
+- Resumen visual del sistema en semaforo (Internet / WiFi / Seguridad / Red Local)
+- Pipeline de seguridad automatico del propio proyecto: CodeQL + Gitleaks en cada push/PR
 
 ## 🚀 Quickstart
 
