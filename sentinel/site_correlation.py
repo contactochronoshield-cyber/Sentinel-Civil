@@ -170,6 +170,134 @@ class SiteCorrelationEngine:
             "evidence": evidence,
         }
 
+    def aggregate_fiber(
+        self,
+        site_id,
+        incidents,
+        minimum_assets=2,
+    ):
+        """
+        Aggregate correlated Fiber/PON incidents belonging to the same site.
+
+        incidents must contain dictionaries with at least:
+        asset_id, incident_type, state, confidence.
+
+        This detects a common-path/site communication pattern.
+        It does not prove a physical fiber cut or root cause.
+        """
+
+        if not self.enabled:
+            return {
+                "enabled": False,
+                "incident": False,
+                "reason": "disabled",
+            }
+
+        incidents = list(incidents or [])
+
+        open_incidents = [
+            item
+            for item in incidents
+            if item.get("state") == "OPEN"
+        ]
+
+        asset_ids = {
+            item.get("asset_id")
+            for item in open_incidents
+            if item.get("asset_id")
+        }
+
+        if len(asset_ids) < minimum_assets:
+            return {
+                "enabled": True,
+                "incident": False,
+                "reason": "insufficient_affected_assets",
+                "affected_assets": len(asset_ids),
+            }
+
+        incident_types = {
+            item.get("incident_type")
+            for item in open_incidents
+            if item.get("incident_type")
+        }
+
+        component_ids = {
+            item.get("component_id")
+            for item in open_incidents
+            if item.get("component_id")
+        }
+
+        evidence = {
+            "site_id": site_id,
+            "affected_assets": sorted(asset_ids),
+            "affected_components": sorted(component_ids),
+            "incident_types": sorted(incident_types),
+            "incident_count": len(open_incidents),
+            "correlation_type": "COMMON_PATH_DEGRADATION",
+        }
+
+        confidence_values = [
+            float(item.get("confidence", 0))
+            for item in open_incidents
+        ]
+
+        average_confidence = (
+            sum(confidence_values) / len(confidence_values)
+            if confidence_values
+            else 0.0
+        )
+
+        confidence = min(
+            0.95,
+            average_confidence + min(0.10, len(asset_ids) * 0.02),
+        )
+
+        incident_id = str(uuid.uuid4())
+        timestamp = time.time()
+
+        self.conn.execute(
+            """
+            INSERT INTO site_incidents (
+                incident_id,
+                timestamp,
+                site_id,
+                incident_type,
+                state,
+                affected_radios,
+                affected_components,
+                confidence,
+                evidence
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                incident_id,
+                timestamp,
+                site_id,
+                "SITE_COMMUNICATION_DEGRADATION",
+                "OPEN",
+                len(asset_ids),
+                len(component_ids),
+                confidence,
+                json.dumps(evidence, sort_keys=True),
+            ),
+        )
+
+        self.conn.commit()
+
+        return {
+            "enabled": True,
+            "incident": True,
+            "incident_id": incident_id,
+            "site_id": site_id,
+            "incident_type": "SITE_COMMUNICATION_DEGRADATION",
+            "state": "OPEN",
+            "affected_assets": len(asset_ids),
+            "affected_components": len(component_ids),
+            "confidence": confidence,
+            "evidence": evidence,
+        }
+
     def recover(self, incident_id):
         row = self.conn.execute(
             """
