@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "2.2.0-COMMUNITY"
+VERSION = "2.4.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -91,14 +91,39 @@ DEFAULT_CONFIG = {
     }
 }
 
+CONFIG_HISTORY_DIR = os.path.join(BASE_DIR, "config_history")
+CONFIG_CHANGES_LOG = os.path.join(BASE_DIR, "config_changes.log")
+
+def _restore_from_backup():
+    if not os.path.isdir(CONFIG_HISTORY_DIR):
+        return None
+    backups = sorted(os.listdir(CONFIG_HISTORY_DIR), reverse=True)
+    for b in backups:
+        try:
+            with open(os.path.join(CONFIG_HISTORY_DIR, b), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return None
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_CONFIG, f, indent=2, ensure_ascii=False)
         print(f"\033[1;33m[!] Config creado en {CONFIG_FILE} — editalo y volvé a correr.\033[0m")
         return DEFAULT_CONFIG
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        print(f"\033[1;31m[SAFE MODE] config.json corrupto o invalido ({e}). Intentando recuperar...\033[0m")
+        restored = _restore_from_backup()
+        if restored:
+            print("\033[1;33m[SAFE MODE] Config restaurado desde el backup mas reciente.\033[0m")
+            cfg = restored
+        else:
+            print("\033[1;33m[SAFE MODE] Sin backups disponibles. Usando configuracion por defecto.\033[0m")
+            cfg = DEFAULT_CONFIG
     merged = {**DEFAULT_CONFIG, **cfg}
     merged["telegram"] = {**DEFAULT_CONFIG["telegram"], **cfg.get("telegram", {})}
     merged["central_reporting"] = {**DEFAULT_CONFIG["central_reporting"], **cfg.get("central_reporting", {})}
@@ -117,6 +142,26 @@ CONFIG = load_config()
 
 def save_config(cfg):
     try:
+        os.makedirs(CONFIG_HISTORY_DIR, exist_ok=True)
+        if os.path.exists(CONFIG_FILE):
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            backup_path = os.path.join(CONFIG_HISTORY_DIR, f"config_{ts}.json")
+            with open(CONFIG_FILE, "r", encoding="utf-8") as src_f, open(backup_path, "w", encoding="utf-8") as dst_f:
+                dst_f.write(src_f.read())
+
+            backups = sorted(os.listdir(CONFIG_HISTORY_DIR))
+            while len(backups) > 5:
+                os.remove(os.path.join(CONFIG_HISTORY_DIR, backups.pop(0)))
+
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    old_cfg = json.load(f)
+                changed_keys = [k for k in cfg if old_cfg.get(k) != cfg.get(k)]
+                with open(CONFIG_CHANGES_LOG, "a", encoding="utf-8") as logf:
+                    logf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Cambio en: {', '.join(changed_keys) if changed_keys else '(sin cambios detectados)'}\n")
+            except Exception:
+                pass
+
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
     except Exception as e:
