@@ -85,6 +85,11 @@ DEFAULT_CONFIG = {
         "history_window": 6,
         "alert_within_minutes": 30
     },
+    "multi_cpe": {
+        "enabled": True,
+        "extra_targets": [],
+        "down_confirm_attempts": 2
+    },
     "log_rotation": {
         "max_bytes": 2097152,
         "backup_count": 3
@@ -135,6 +140,7 @@ def load_config():
     merged["dual_wan"] = {**DEFAULT_CONFIG["dual_wan"], **cfg.get("dual_wan", {})}
     merged["sim_security"] = {**DEFAULT_CONFIG["sim_security"], **cfg.get("sim_security", {})}
     merged["predictive_health"] = {**DEFAULT_CONFIG["predictive_health"], **cfg.get("predictive_health", {})}
+    merged["multi_cpe"] = {**DEFAULT_CONFIG["multi_cpe"], **cfg.get("multi_cpe", {})}
     merged["log_rotation"] = {**DEFAULT_CONFIG["log_rotation"], **cfg.get("log_rotation", {})}
     return merged
 
@@ -589,6 +595,31 @@ def predict_degradation(history, critical_threshold):
     return {"slope_per_cycle": slope, "cycles_to_critical": cycles_to_critical}
 
 # ---------------------------------------------------------------------------
+# RECUPERACION - recomendaciones segun el estado del CPE (vivo/muerto/comprometido)
+# ---------------------------------------------------------------------------
+def recommend_action(status, reasons):
+    if status == "DOWN":
+        return ("Sin respuesta. Verificar: 1) alimentacion electrica del equipo, "
+                "2) cables de red conectados, 3) reiniciar (apagar 10s y encender). "
+                "Si sigue sin responder, posible falla de hardware.")
+    if status == "HIGH RISK":
+        acciones = ["Cambiar la contraseña de administracion y la clave WiFi.",
+                    "Entrar al panel y desactivar Telnet/administracion remota si esta activa.",
+                    "Actualizar firmware si hay version disponible.",
+                    "Si el comportamiento es muy anomalo, considerar reset de fabrica."]
+        return " ".join(acciones)
+    if status == "COMPENSATABLE":
+        return "Revisar si el panel de administracion necesita estar expuesto; restringir acceso si es posible."
+    return "Sin acciones necesarias."
+
+def ping_alive(ip, count=1, timeout=1):
+    try:
+        subprocess.check_output(f"ping -c {count} -W {timeout} {ip} 2>/dev/null", shell=True)
+        return True
+    except Exception:
+        return False
+
+# ---------------------------------------------------------------------------
 # KERNEL
 # ---------------------------------------------------------------------------
 class CivicKernel:
@@ -1031,6 +1062,7 @@ class CivicKernel:
 
     def check_cpe_security(self, gateway_ip):
         cs = CONFIG.get("cpe_security", {})
+        mc = CONFIG.get("multi_cpe", {})
         if not cs.get("enabled") or not gateway_ip:
             return
 
@@ -1041,26 +1073,56 @@ class CivicKernel:
         if self.cpe_cycle_counter % interval != 1:
             return
 
-        print("\033[32m[+] CPE Security Monitoring (Gateway):\033[0m")
+        targets = [gateway_ip] + [t for t in mc.get("extra_targets", []) if t != gateway_ip]
+        if not hasattr(self, "cpe_down_counts"):
+            self.cpe_down_counts = {}
+
+        print(f"\033[32m[+] CPE Security Monitoring ({len(targets)} equipo(s)):\033[0m")
         all_ports = list(set(cs.get("risky_ports", []) + cs.get("admin_ports", [])))
-        open_ports = scan_gateway_ports(gateway_ip, all_ports)
-        dns_servers = get_device_dns_servers()
+        down_confirm = mc.get("down_confirm_attempts", 2)
 
-        risk, reasons = classify_cpe_risk(open_ports, dns_servers, gateway_ip, cs)
-        self.last_cpe_risk = risk
+        results_summary = []
+        for target_ip in targets:
+            print(f"  \033[1;36m> Equipo: {target_ip}\033[0m")
+            alive = ping_alive(target_ip)
 
-        color = {"SUPPORTED": "\033[1;32m", "COMPENSATABLE": "\033[1;33m", "HIGH RISK": "\033[1;31m"}.get(risk, "")
-        print(f"  > Clasificacion: {color}{risk}\033[0m")
-        print(f"  > Puertos abiertos detectados: {open_ports if open_ports else 'ninguno'}")
-        print(f"  > DNS del dispositivo: {dns_servers if dns_servers else 'no disponible'}")
+            if not alive:
+                self.cpe_down_counts[target_ip] = self.cpe_down_counts.get(target_ip, 0) + 1
+                if self.cpe_down_counts[target_ip] >= down_confirm:
+                    print(f"    Clasificacion: \033[1;31mDOWN (sin respuesta)\033[0m")
+                    action = recommend_action("DOWN", [])
+                    msg = f"Equipo {target_ip} no responde (confirmado {self.cpe_down_counts[target_ip]} veces). {action}"
+                    self.log_and_print("CRITICAL", "CPE_DOWN", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
+                else:
+                    print(f"    \033[1;33m[i] Sin respuesta, confirmando ({self.cpe_down_counts[target_ip]}/{down_confirm})...\033[0m")
+                results_summary.append((target_ip, "DOWN"))
+                continue
 
-        if risk == "HIGH RISK":
-            for r in reasons:
-                msg = f"CPE riesgo alto ({gateway_ip}): {r}"
-                self.log_and_print("CRITICAL", "CPE_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
-        elif risk == "COMPENSATABLE":
-            for r in reasons:
-                print(f"    \033[1;33m[i] {r}\033[0m")
+            self.cpe_down_counts[target_ip] = 0
+            open_ports = scan_gateway_ports(target_ip, all_ports)
+            dns_servers = get_device_dns_servers() if target_ip == gateway_ip else []
+            risk, reasons = classify_cpe_risk(open_ports, dns_servers, target_ip, cs)
+
+            if target_ip == gateway_ip:
+                self.last_cpe_risk = risk
+
+            color = {"SUPPORTED": "\033[1;32m", "COMPENSATABLE": "\033[1;33m", "HIGH RISK": "\033[1;31m"}.get(risk, "")
+            print(f"    Clasificacion: {color}{risk}\033[0m | Puertos: {open_ports if open_ports else 'ninguno'}")
+            results_summary.append((target_ip, risk))
+
+            if risk == "HIGH RISK":
+                action = recommend_action("HIGH RISK", reasons)
+                for r in reasons:
+                    msg = f"CPE riesgo alto ({target_ip}): {r}. Accion recomendada: {action}"
+                    self.log_and_print("CRITICAL", "CPE_SECURITY", msg, f"    \033[1;31m[CRITICAL] {msg}\033[0m")
+            elif risk == "COMPENSATABLE":
+                for r in reasons:
+                    print(f"    \033[1;33m[i] {r}\033[0m")
+
+        if len(targets) > 1:
+            print("  \033[32m--- Resumen multi-equipo ---\033[0m")
+            for ip, status in results_summary:
+                print(f"    {ip}: {status}")
 
     def check_dual_wan_health(self):
         dw = CONFIG.get("dual_wan", {})
