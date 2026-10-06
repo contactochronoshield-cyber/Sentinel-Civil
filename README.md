@@ -107,3 +107,139 @@ MIT — usalo, modificalo, deployalo donde quieras.
 ---
 
 <sub>Desarrollado por Chrono Shield Networks — infraestructura digital soberana para Latinoamérica.</sub>
+
+## Sentinel Central Enterprise
+
+Sentinel Central Enterprise es la capa comercial de Sentinel Civil para organizaciones que necesitan administrar múltiples nodos desde una infraestructura central propia.
+
+**Sentinel Civil continúa siendo open source bajo licencia MIT.** Sentinel Central Enterprise añade capacidades comerciales de administración centralizada, licenciamiento, políticas, límites, auditoría y aislamiento entre organizaciones.
+
+### Organizaciones
+
+Diseñado para:
+
+- ISPs y WISPs
+- Empresas privadas
+- Gobiernos y entidades públicas
+- Universidades
+- Organizaciones comunitarias
+- Organizaciones sin ánimo de lucro
+- Equipos que administran infraestructura distribuida
+
+### Licenciamiento
+
+El acceso a las capacidades Enterprise se controla mediante una licencia asociada a una organización.
+
+Estados de licencia:
+
+`PENDING → APPROVED → ACTIVE → SUSPENDED / EXPIRED / REVOKED`
+
+Las licencias pueden definir:
+
+- Organización
+- Plan
+- Vigencia
+- Máximo de nodos
+- Máximo de usuarios
+- Funciones habilitadas
+
+Una licencia suspendida, expirada o revocada no debe permitir el uso de las capacidades Enterprise correspondientes.
+
+### Planes comerciales
+
+#### Professional — US$1.200/año
+
+- Hasta 100 nodos
+- Hasta 10 usuarios
+- Administración centralizada
+- Auditoría
+- Políticas organizacionales
+- Soporte estándar
+
+#### Enterprise — US$2.400/año
+
+- Hasta 500 nodos
+- Hasta 25 usuarios
+- Administración multi-nodo
+- Auditoría avanzada
+- Políticas y límites empresariales
+- Branding organizacional
+- Capacidades Enterprise ampliadas
+
+#### Government — desde US$3.600/año
+
+- Diseñado para organizaciones públicas y despliegues de mayor escala
+- 500+ nodos según configuración
+- Usuarios y capacidades personalizados
+- Soporte y condiciones contractuales según proyecto
+
+Los precios son referencias comerciales y pueden variar según cantidad de nodos, usuarios, soporte, integración, despliegue y requisitos contractuales.
+
+### Privacidad y datos
+
+Sentinel Central está diseñado para ejecutarse en infraestructura controlada por la organización.
+
+Los datos operativos pueden permanecer en los servidores del cliente. La licencia comercial controla el acceso a las capacidades Enterprise, pero Sentinel Central no requiere enviar continuamente los datos operativos de la organización a Chrono Shield Networks.
+
+Cada organización posee un contexto independiente. Los recursos de una organización no deben ser administrados desde el contexto de otra organización.
+
+### Sentinel FieldProof
+
+Sentinel FieldProof permite generar un registro físico y digital de una intervención técnica.
+
+Un FieldProof puede incluir:
+
+- Identificador único
+- Fecha y hora
+- Nodo
+- Activo intervenido
+- Tipo de intervención
+- Acción realizada
+- Resultado
+- Estado inicial y final
+- Técnico
+- Referencias de evidencia
+- SHA-256
+- Código QR
+- Estado de verificación
+
+Los registros pueden convertirse en documentos imprimibles y comprobantes físicos mediante impresoras compatibles, incluidas impresoras térmicas portátiles.
+
+Esto permite que un técnico pueda entregar un comprobante físico después de una intervención incluso en condiciones de conectividad limitada.
+
+### Uso legal y evidencia
+
+FieldProof está diseñado como un mecanismo técnico de **registro, integridad y trazabilidad**.
+
+El hash SHA-256 permite comprobar que el registro almacenado no haya sido alterado después de su generación.
+
+**FieldProof no constituye por sí mismo una certificación legal ni garantiza la admisibilidad de una evidencia ante un tribunal.**
+
+La validez jurídica de un registro depende de la legislación aplicable, los procedimientos de la organización, la cadena de custodia, la autenticidad de las fuentes y los requisitos de la autoridad competente.
+
+Sentinel Civil y Sentinel Central no sustituyen asesoría jurídica, procedimientos de cumplimiento ni obligaciones regulatorias.
+
+### Seguridad y aislamiento
+
+Sentinel Central incorpora controles para evitar el acceso cruzado entre organizaciones.
+
+Las operaciones sensibles pueden ejecutarse mediante un `OrganizationContext`, permitiendo comprobar que el recurso solicitado pertenece a la organización que realiza la operación.
+
+El sistema registra eventos de auditoría relacionados con:
+
+- Creación de organizaciones
+- Creación y aprobación de licencias
+- Activación y suspensión de licencias
+- Accesos permitidos y denegados
+- Registro de nodos
+- Heartbeats y comprobaciones de salud
+
+### Estado del módulo Enterprise
+
+Sentinel Central Enterprise se encuentra en desarrollo activo.
+
+Las funciones de organización, licenciamiento, políticas, límites, nodos, salud, persistencia, auditoría y aislamiento organizacional han sido sometidas a pruebas específicas.
+
+La autenticación completa de usuarios, gestión de sesiones, MFA, firma criptográfica de licencias y otros controles necesarios para despliegues empresariales de alta seguridad continúan siendo áreas de desarrollo.
+
+**Este módulo no debe interpretarse todavía como una plataforma de producción completamente certificada.**
