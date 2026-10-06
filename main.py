@@ -11,7 +11,7 @@ import urllib.parse
 from logging.handlers import RotatingFileHandler
 
 TYPE = "CIVIL"
-VERSION = "2.4.0-COMMUNITY"
+VERSION = "2.5.0-COMMUNITY"
 
 HOME = os.path.expanduser("~")
 BASE_DIR = os.path.join(HOME, "sentinel_public")
@@ -1254,6 +1254,36 @@ class CivicKernel:
             send_telegram(f"🔴 <b>{CONFIG['node_name']}</b> — Sentinel Civic-Core detenido.")
         sys.exit(0)
 
+# ---------------------------------------------------------------------------
+# EXPORT MIKROTIK - genera script .rsc con los dispositivos conocidos como
+# address-list, listo para importar en RouterOS (uso: python3 main.py --export-mikrotik)
+# ---------------------------------------------------------------------------
+def export_mikrotik_rsc():
+    known_ips = sorted(set(CONFIG.get("lan_monitoring", {}).get("known_ips", [])))
+    node_name = CONFIG.get("node_name", "sentinel-node")
+    out_path = os.path.join(BASE_DIR, "mikrotik_export.rsc")
+
+    lines = [
+        f"# Generado por Sentinel Civic-Core v{VERSION}",
+        f"# Nodo: {node_name} | Fecha: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "# Importar en RouterOS: /import mikrotik_export.rsc",
+        "",
+        "/ip firewall address-list"
+    ]
+
+    if not known_ips:
+        lines.append("# (sin dispositivos conocidos en el baseline todavia)")
+    else:
+        for ip in known_ips:
+            lines.append(f'add list=Sentinel_Known address={ip} comment="Baseline Sentinel {node_name}"')
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(f"\033[1;32m[✓] Export MikroTik generado: {out_path}\033[0m")
+    print(f"    {len(known_ips)} dispositivo(s) conocido(s) exportados a la lista 'Sentinel_Known'.")
+    print(f"    En el router: /import file={os.path.basename(out_path)}")
+
 def signal_bar(rssi, width=20):
     """Convierte RSSI (-30 a -95 aprox) en una barra visual simple."""
     if rssi is None:
@@ -1317,6 +1347,8 @@ def run_survey_mode():
 if __name__ == "__main__":
     if "--survey" in sys.argv or "survey" in sys.argv:
         run_survey_mode()
+    elif "--export-mikrotik" in sys.argv:
+        export_mikrotik_rsc()
     else:
         kernel = CivicKernel()
         kernel.boot()

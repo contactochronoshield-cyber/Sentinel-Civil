@@ -2,7 +2,7 @@
 
 **Monitoreo de infraestructura anti-sabotaje que corre en un celular viejo con Termux — sin nube, sin dependencias pesadas, sin que nadie más vea tus datos.**
 
-![version](https://img.shields.io/badge/version-2.3.0-blue)
+![version](https://img.shields.io/badge/version-2.5.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.9%2B-yellow)
 ![platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20Android-lightgrey)
@@ -42,6 +42,8 @@ Es la pieza base de código abierto detrás de la infraestructura de [Chrono Shi
 - Prediccion de degradacion de enlace (regresion lineal sobre latencia, avisa antes de que se caiga del todo)
 - Resumen visual del sistema en semaforo (Internet / WiFi / Seguridad / Red Local)
 - Pipeline de seguridad automatico del propio proyecto: CodeQL + Gitleaks en cada push/PR
+- Multi-CPE: monitorea varios routers/switches a la vez, distingue equipo comprometido de equipo caido, con recomendacion de accion
+- Export a MikroTik RouterOS (--export-mikrotik): genera un .rsc con los dispositivos conocidos listo para importar
 
 ## 🚀 Quickstart
 
