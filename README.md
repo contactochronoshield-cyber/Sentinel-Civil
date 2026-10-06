@@ -44,6 +44,8 @@ Es la pieza base de código abierto detrás de la infraestructura de [Chrono Shi
 - Pipeline de seguridad automatico del propio proyecto: CodeQL + Gitleaks en cada push/PR
 - Multi-CPE: monitorea varios routers/switches a la vez, distingue equipo comprometido de equipo caido, con recomendacion de accion
 - Export a MikroTik RouterOS (--export-mikrotik): genera un .rsc con los dispositivos conocidos listo para importar
+- Multi-CPE: monitorea varios routers/switches a la vez, distingue equipo comprometido de equipo caido, con recomendacion de accion
+- Export a MikroTik RouterOS (--export-mikrotik): genera un .rsc con los dispositivos conocidos listo para importar
 
 ## 🚀 Quickstart
 
