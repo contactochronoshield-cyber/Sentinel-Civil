@@ -47,6 +47,10 @@ Es la pieza base de código abierto detrás de la infraestructura de [Chrono Shi
 - Multi-CPE: monitorea varios routers/switches a la vez, distingue equipo comprometido de equipo caido, con recomendacion de accion
 - Export a MikroTik RouterOS (--export-mikrotik): genera un .rsc con los dispositivos conocidos listo para importar
 
+## 📸 Demo
+
+_GIF de demostracion en vivo — proximamente._
+
 ## 🚀 Quickstart
 
 ```bash
